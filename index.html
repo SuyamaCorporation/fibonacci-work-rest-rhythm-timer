@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fibonacci Work-Rest Rhythm Timer</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  @keyframes rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .ring-progress { transition: stroke-dashoffset 1s linear; }
+</style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen py-8 px-4">
+<div class="max-w-xl mx-auto">
+<h1 class="text-3xl font-bold text-yellow-400 mb-1">Fibonacci Timer</h1>
+<p class="text-gray-400 text-sm mb-6">Work intervals: 1,1,2,3,5,8,13 min · Break = configurable % of work time</p>
+
+<div class="flex items-center gap-4 mb-6">
+  <label class="text-xs text-gray-400" for="breakPct">Break %</label>
+  <input id="breakPct" type="range" min="10" max="50" value="20" class="w-28 accent-yellow-400"
+    aria-label="Break duration as percentage of work time">
+  <span id="breakPctVal" class="text-yellow-300 text-sm w-10">20%</span>
+  <button id="resetAllBtn" class="ml-auto px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded-lg text-xs transition"
+    aria-label="Reset all session progress">Reset All</button>
+</div>
+
+<div class="bg-gray-800 rounded-2xl p-8 mb-5 flex flex-col items-center">
+  <div class="relative w-52 h-52 mb-4">
+    <svg class="w-full h-full -rotate-90" viewBox="0 0 100 100" role="img" aria-label="Circular progress timer">
+      <circle cx="50" cy="50" r="44" fill="none" stroke="#374151" stroke-width="8"/>
+      <circle id="progressRing" cx="50" cy="50" r="44" fill="none"
+        stroke="#facc15" stroke-width="8" stroke-linecap="round"
+        stroke-dasharray="276.46" stroke-dashoffset="276.46"
+        class="ring-progress"/>
+    </svg>
+    <div class="absolute inset-0 flex flex-col items-center justify-center">
+      <p id="phaseLabel" class="text-xs uppercase tracking-widest text-gray-400"></p>
+      <p id="timerDisplay" class="text-5xl font-bold font-mono text-yellow-300">00:00</p>
+      <p id="intervalLabel" class="text-xs text-gray-500 mt-1"></p>
+    </div>
+  </div>
+  <div class="flex gap-3">
+    <button id="startBtn" class="px-8 py-3 bg-yellow-600 hover:bg-yellow-500 rounded-xl font-bold text-lg transition"
+      aria-label="Start or pause timer">Start</button>
+    <button id="nextBtn" class="px-4 py-3 bg-gray-700 hover:bg-gray-600 rounded-xl transition text-sm"
+      aria-label="Skip to next interval">Next</button>
+  </div>
+</div>
+
+<div class="bg-gray-800 rounded-2xl p-5 mb-5">
+  <p class="text-sm font-semibold text-gray-300 mb-3">Fibonacci Sequence</p>
+  <div id="seqDisplay" class="flex flex-wrap gap-2" role="list" aria-label="Fibonacci interval sequence"></div>
+</div>
+
+<div class="bg-gray-800 rounded-2xl p-5">
+  <div class="flex justify-between items-center mb-3">
+    <p class="text-sm font-semibold text-gray-300">Session Log</p>
+    <span id="totalTime" class="text-xs text-gray-500">Total: 0m</span>
+  </div>
+  <div id="sessionLog" class="space-y-1 max-h-48 overflow-y-auto text-sm"></div>
+  <p id="noLog" class="text-gray-600 text-xs text-center py-2">No intervals completed yet</p>
+</div>
+</div>
+
+<script>
+const FIB_WORK = [1, 1, 2, 3, 5, 8, 13];
+const CIRCUMFERENCE = 2 * Math.PI * 44;
+
+let breakPct = 20;
+let sequence = [];
+let currentIdx = 0;
+let isWork = true;
+let running = false;
+let intervalId = null;
+let remaining = 0;
+let totalDuration = 0;
+let log = [];
+let audioCtx = null;
+
+function getAudioCtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+}
+
+function playChime(type) {
+  const ctx = getAudioCtx();
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.connect(gain); gain.connect(ctx.destination);
+  osc.type = 'sine';
+  if (type === 'work') { osc.frequency.value = 880; gain.gain.setValueAtTime(0.3, ctx.currentTime); gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6); osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.6); }
+  else if (type === 'break') { osc.frequency.value = 440; gain.gain.setValueAtTime(0.3, ctx.currentTime); gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 1.0); osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 1.0); }
+  else { osc.frequency.value = 660; gain.gain.setValueAtTime(0.4, ctx.currentTime); gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 1.5); osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 1.5); }
+}
+
+function buildSequence() {
+  sequence = [];
+  FIB_WORK.forEach(w => {
+    sequence.push({ type: 'work', minutes: w });
+    sequence.push({ type: 'break', minutes: Math.max(0.5, Math.round(w * breakPct / 100 * 10) / 10) });
+  });
+}
+
+function formatTime(secs) {
+  const m = Math.floor(secs / 60);
+  const s = Math.floor(secs % 60);
+  return String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+}
+
+function updateRing(elapsed, total) {
+  const pct = total > 0 ? Math.max(0, Math.min(1, elapsed / total)) : 0;
+  const offset = CIRCUMFERENCE * (1 - pct);
+  document.getElementById('progressRing').setAttribute('stroke-dashoffset', offset);
+  document.getElementById('progressRing').setAttribute('stroke', isWork ? '#facc15' : '#34d399');
+}
+
+function renderSeq() {
+  const el = document.getElementById('seqDisplay');
+  el.textContent = '';
+  sequence.forEach((s, i) => {
+    if (s.type === 'break') return;
+    const idx = Math.floor(i / 2);
+    const done = Math.floor(currentIdx / 2) > idx || (Math.floor(currentIdx / 2) === idx && !isWork);
+    const active = Math.floor(currentIdx / 2) === idx && isWork;
+    const div = document.createElement('div');
+    div.setAttribute('role', 'listitem');
+    div.className = 'px-3 py-1.5 rounded-lg text-xs font-bold ' + (
+      active ? 'bg-yellow-500 text-gray-900 ring-2 ring-yellow-300' :
+      done ? 'bg-green-800 text-green-200 line-through' : 'bg-gray-700 text-gray-300'
+    );
+    div.textContent = s.minutes + 'm';
+    el.appendChild(div);
+  });
+}
+
+function renderLog() {
+  const el = document.getElementById('sessionLog');
+  const noLog = document.getElementById('noLog');
+  el.textContent = '';
+  const totalMin = log.reduce((s, e) => s + e.minutes, 0);
+  document.getElementById('totalTime').textContent = 'Total: ' + totalMin.toFixed(1) + 'm';
+  if (log.length === 0) { noLog.classList.remove('hidden'); return; }
+  noLog.classList.add('hidden');
+  [...log].reverse().forEach(entry => {
+    const row = document.createElement('div');
+    row.className = 'flex justify-between text-xs py-1 border-b border-gray-700';
+    const left = document.createElement('span');
+    left.textContent = entry.time + ' — ' + (entry.type === 'work' ? 'Work' : 'Break');
+    const right = document.createElement('span');
+    right.className = entry.type === 'work' ? 'text-yellow-300' : 'text-green-300';
+    right.textContent = entry.minutes + ' min';
+    row.appendChild(left); row.appendChild(right);
+    el.appendChild(row);
+  });
+}
+
+function tick() {
+  remaining--;
+  const cur = sequence[currentIdx];
+  const total = cur.minutes * 60;
+  const elapsed = total - remaining;
+  updateRing(elapsed, total);
+  document.getElementById('timerDisplay').textContent = formatTime(remaining);
+  if (remaining <= 0) {
+    const now = new Date();
+    log.push({ type: cur.type, minutes: cur.minutes, time: String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0') });
+    renderLog();
+    currentIdx++;
+    isWork = !isWork;
+    if (currentIdx >= sequence.length) {
+      playChime('done');
+      clearInterval(intervalId);
+      running = false;
+      document.getElementById('startBtn').textContent = 'Start';
+      document.getElementById('phaseLabel').textContent = 'Complete!';
+      document.getElementById('timerDisplay').textContent = '00:00';
+      renderSeq();
+      return;
+    }
+    playChime(isWork ? 'work' : 'break');
+    loadCurrent();
+    renderSeq();
+  }
+}
+
+function loadCurrent() {
+  if (currentIdx >= sequence.length) return;
+  const cur = sequence[currentIdx];
+  remaining = cur.minutes * 60;
+  isWork = cur.type === 'work';
+  document.getElementById('phaseLabel').textContent = isWork ? 'WORK' : 'BREAK';
+  document.getElementById('intervalLabel').textContent = (isWork ? 'Fibonacci #' + (Math.floor(currentIdx/2)+1) : 'Rest') + ' · ' + cur.minutes + ' min';
+  document.getElementById('timerDisplay').textContent = formatTime(remaining);
+  updateRing(0, remaining);
+  document.getElementById('progressRing').setAttribute('stroke', isWork ? '#facc15' : '#34d399');
+}
+
+document.getElementById('startBtn').addEventListener('click', () => {
+  if (running) {
+    clearInterval(intervalId); running = false;
+    document.getElementById('startBtn').textContent = 'Resume';
+  } else {
+    if (currentIdx >= sequence.length) {
+      currentIdx = 0; isWork = true; log = [];
+      buildSequence(); loadCurrent(); renderLog();
+    }
+    running = true;
+    document.getElementById('startBtn').textContent = 'Pause';
+    intervalId = setInterval(tick, 1000);
+    renderSeq();
+  }
+});
+
+document.getElementById('nextBtn').addEventListener('click', () => {
+  if (intervalId) clearInterval(intervalId);
+  const cur = sequence[currentIdx];
+  if (cur) log.push({ type: cur.type, minutes: cur.minutes, time: '(skipped)' });
+  currentIdx++;
+  isWork = !isWork;
+  if (currentIdx >= sequence.length) {
+    running = false;
+    document.getElementById('startBtn').textContent = 'Start';
+    document.getElementById('phaseLabel').textContent = 'Complete!';
+    renderSeq(); renderLog(); return;
+  }
+  loadCurrent(); renderSeq(); renderLog();
+  if (running) intervalId = setInterval(tick, 1000);
+});
+
+document.getElementById('breakPct').addEventListener('input', function() {
+  breakPct = parseInt(this.value);
+  document.getElementById('breakPctVal').textContent = breakPct + '%';
+  buildSequence(); loadCurrent(); renderSeq();
+});
+
+document.getElementById('resetAllBtn').addEventListener('click', () => {
+  clearInterval(intervalId); running = false; currentIdx = 0; isWork = true; log = [];
+  document.getElementById('startBtn').textContent = 'Start';
+  buildSequence(); loadCurrent(); renderSeq(); renderLog();
+});
+
+buildSequence();
+loadCurrent();
+renderSeq();
+renderLog();
+</script>
+</body>
+</html>
